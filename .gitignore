@@ -1,6 +1,5 @@
 .venv/
 next/
 notes/
-segmentation.py
 __pycache__/
 *.pyc

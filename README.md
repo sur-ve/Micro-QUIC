@@ -38,3 +38,60 @@ Micro-QUIC adds a header over User Datagram Protocol(UDP), that helps performs s
   * When a data packet is labeled non-critical, it's loss does not trigger retransmission, thereby cutting the overhead.
   * When a packet is labeled critical, the server sends back an acknowledgement ACK packet to the client. This acknowledgment is not cumulative as in TCP but is per-packet acknowledgement.
   * However if this packet is lost, the ACK is not sent back to the client and the client retransmits the packet based on a fixed timer (ARQ).
+
+## Project layout
+
+| File | Role |
+| :--- | :--- |
+| `header.py` | 13-byte Micro-QUIC header pack/unpack + CRC32 |
+| `micro_quic.py` | UDP socket wrapper: critical ARQ, fragmentation, reassembly |
+| `channel.py` | Lossy proxy (drop / delay / corrupt) for local testing |
+| `sender.py` | Telemetry demo (synthetic critical ratio) |
+| `benchmark.py` | TCP vs UDP vs Micro-QUIC comparison |
+| `features.py` | Per-frame features: mean grayscale diff + JPEG size |
+| `train_classifier.py` | Train criticality model → `criticality_model.pkl` |
+| `classifier.py` | Load model and predict critical / non-critical |
+| `video_sender.py` | ML-driven video stream sender |
+| `video_receiver.py` | Receive, reassemble, decode JPEG frames |
+| `02-todo-features.md` | Remaining work and planned features |
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r dependancies.txt
+```
+
+## Run — ML video stream
+
+```bash
+# Terminal 1 — receiver
+python video_receiver.py --port 50007 --no-display
+
+# Terminal 2 — sender (optional loss simulation)
+python video_sender.py --video data/testVideo.mp4 --port 50007 --max-frames 30
+python video_sender.py --video data/testVideo.mp4 --port 50007 --loss-rate 0.15 --max-frames 30
+```
+
+Omit `--no-display` on the receiver to show frames in an OpenCV window (`q` to quit).
+
+## Run — telemetry demo
+
+```bash
+python sender.py receiver --port 50007
+python sender.py sender --port 50007 --count 30 --critical-ratio 0.2 --loss-rate 0.15
+```
+
+## Retrain the criticality model
+
+```bash
+python train_classifier.py   # reads data/testVideo.mp4, writes criticality_model.pkl
+```
+
+## How the ML path fits in
+
+1. Sender extracts `(frame_diff, jpeg_size)` per frame.
+2. `predict_criticality` marks the frame critical or normal.
+3. `send_packet` fragments large JPEGs (≤1200 B chunks); critical fragments use Stop-and-Wait ARQ.
+4. Receiver ACKs critical fragments, reassembles the frame, and decodes the JPEG.
