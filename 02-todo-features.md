@@ -1,10 +1,7 @@
-# Micro-QUIC — To Be Completed & Features To Add
-
-Living checklist of unfinished work and planned upgrades. Check items off as they land.
-
+# Micro-QUIC — Features To Add Possibly
 ---
 
-## To Be Completed (gaps in current code)
+## To Be Completed 
 
 ### Protocol (`micro_quic.py` / `header.py`)
 - [ ] **Sliding window ARQ** — replace per-fragment Stop-and-Wait with Go-Back-N or Selective Repeat for higher critical-frame throughput
@@ -25,13 +22,6 @@ Living checklist of unfinished work and planned upgrades. Check items off as the
 - [ ] **Save received stream to file** — write decoded frames or MJPEG/MP4 from `video_receiver.py`
 - [ ] **Unify CLIs** — align flags between `sender.py` (telemetry) and `video_*.py`
 - [ ] **Headless CI smoke test** — scripted N-frame send/recv with asserts (no GUI)
-
-### Project hygiene
-- [ ] Rename `dependancies.txt` → `requirements.txt` and pin versions
-- [ ] Drop unused `pandas` (or start using it for training logs)
-- [ ] Refresh `README.md` with video + ML run instructions
-- [ ] Update `00-plan.md` / `01-change.md` checkboxes to match implemented state
-
 ---
 
 ## Features To Add (new capability)
@@ -48,14 +38,3 @@ Living checklist of unfinished work and planned upgrades. Check items off as the
 | Low | Cross-host demo docs | Non-localhost setup, firewall, Wireshark filters |
 | Low | Alternate codecs | H.264 NAL units or raw YUV instead of JPEG-per-frame |
 
----
-
-## Done recently (for context)
-
-- [x] 13-byte Micro-QUIC header + CRC32
-- [x] Critical Stop-and-Wait ARQ + non-critical fire-and-forget
-- [x] Lossy channel proxy (`channel.py`)
-- [x] TCP / UDP / Micro-QUIC benchmark harness
-- [x] Frame feature extraction + criticality classifier
-- [x] Payload fragmentation + receiver reassembly
-- [x] ML-driven `video_sender.py` / `video_receiver.py`
