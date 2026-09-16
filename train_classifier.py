@@ -30,20 +30,28 @@ while True:
         break;
 cap.release()
 
+# capturing feature data for classification
 X = np.array(feature_data)
+
+# scaling the abs frame diff and size to standardise them
 scaler = StandardScaler()
-scaled_features = scaler.fit_transform(X)
+scaled_features = scaler.fit_transform(X) 
+
+# K-Means Clustering model to cluster features into critical and non-critical
 kmeans_model = KMeans(n_clusters=2, random_state = 0)
-raw_cluster = kmeans_model.fit_predict(scaled_features)
+raw_cluster = kmeans_model.fit_predict(scaled_features) 
+
+# centroid values of both clusters for both features
 centroid_values = kmeans_model.cluster_centers_
-if centroid_values[0][0] > centroid_values[1][0]:
+if centroid_values[0][0] > centroid_values[1][0]: # comparing abs frame diff in both clusters and labelling the one with higher diff as critical
     critical_cluster_id = 0
 else: 
     critical_cluster_id = 1
-y = (raw_cluster == critical_cluster_id)
+y = (raw_cluster == critical_cluster_id) # creating the classifier output to train the model on [test set]
 
-
+# sklearn pipeline to first implement scaler on X data and train classifier using y data as target. max_depth = 3 for faster runtime
 pipeline = Pipeline([('scaler', StandardScaler()), ('classifier', DecisionTreeClassifier(max_depth=3))])
 pipeline.fit(X, y)
 
+# dumping the pipeline to a makefile for faster access
 joblib.dump(pipeline, 'criticality_model.pkl')
