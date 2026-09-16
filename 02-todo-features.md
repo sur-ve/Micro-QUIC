@@ -1,4 +1,4 @@
-# Micro-QUIC — Features To Add Possibly
+# Micro-QUIC — Features To Add
 ---
 
 ## To Be Completed 
