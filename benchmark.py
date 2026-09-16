@@ -2,14 +2,24 @@ import time
 import socket
 import threading
 from micro_quic import MicroQUICSocket
-from channel import LossyChannel
+from channel import LossyChannel, LossyTCPChannel, tcp_send_frame, tcp_recv_frame, tcp_send_reliable
 
 def run_tcp_benchmark(total_packets: int, loss_rate: float) -> dict:
+    """
+    TCP-like reliability under the same loss model: Stop-and-Wait ARQ on *every*
+    message. Micro-QUIC only ARQs the critical ~20%, which is why it should be faster.
+    """
     server_port = 55001
-    
+    proxy_port = 55002
+    rto = 0.02
+    max_retries = 5
+
+    channel = LossyTCPChannel(listen_port=proxy_port, target_port=server_port, loss_rate=loss_rate)
+    channel.start()
+
     received_count = 0
-    start_time = 0
-    end_time = 0
+    critical_received = 0
+    end_time = 0.0
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -17,13 +27,25 @@ def run_tcp_benchmark(total_packets: int, loss_rate: float) -> dict:
     server_sock.listen(1)
 
     def server_thread():
-        nonlocal received_count, end_time
+        nonlocal received_count, critical_received, end_time
         conn, _ = server_sock.accept()
+        seen = set()
         while True:
-            data = conn.recv(1024)
-            if not data:
+            data = tcp_recv_frame(conn)
+            if data is None:
                 break
-            received_count += 1
+            # Retransmits after a lost/late ACK must still be ACKed, but only counted once
+            if data not in seen:
+                seen.add(data)
+                received_count += 1
+                if data.startswith(b"CRITICAL"):
+                    critical_received += 1
+            # Echo packet id so the client ignores stale ACKs from earlier retransmits
+            pkt_id = data.rsplit(b"_", 1)[-1]
+            try:
+                tcp_send_frame(conn, b"ACK_" + pkt_id)
+            except OSError:
+                break
         end_time = time.time()
         conn.close()
         server_sock.close()
@@ -34,23 +56,35 @@ def run_tcp_benchmark(total_packets: int, loss_rate: float) -> dict:
     time.sleep(0.1)
 
     client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_sock.connect(('127.0.0.1', server_port))
+    client_sock.connect(('127.0.0.1', proxy_port))
 
     start_time = time.time()
-    critical_total = int(total_packets * 0.2)
+    critical_total = 0
     for i in range(total_packets):
-        client_sock.sendall(f"TCP_PACKET_{i}".encode())
+        is_crit = (i % 5 == 0)  # 20% critical — same as UDP / Micro-QUIC
+        if is_crit:
+            critical_total += 1
+        prefix = b"CRITICAL_" if is_crit else b"NORMAL_"
+        payload = prefix + f"TCP_PACKET_{i}".encode()
+        tcp_send_reliable(
+            client_sock,
+            payload,
+            ack_token=f"ACK_{i}".encode(),
+            timeout=rto,
+            max_retries=max_retries,
+        )
         time.sleep(0.001)
     client_sock.close()
 
     t.join(timeout=5.0)
+    channel.stop()
 
-    elapsed = (end_time - start_time) if end_time > start_time else 0.001
+    elapsed = (end_time - start_time) if end_time > start_time else (time.time() - start_time)
     return {
         'protocol': 'Standard TCP',
         'sent': total_packets,
         'received': received_count,
-        'critical_received': critical_total,
+        'critical_received': critical_received,
         'critical_total': critical_total,
         'time_sec': elapsed
     }
@@ -144,7 +178,8 @@ def run_microquic_benchmark(total_packets: int, loss_rate: float) -> dict:
     t = threading.Thread(target=receiver_thread, daemon=True)
     t.start()
 
-    client_quic = MicroQUICSocket(timeout=0.08, max_retries=5)
+    # Same RTO as TCP path: only critical (~20%) pay Stop-and-Wait under loss
+    client_quic = MicroQUICSocket(timeout=0.02, max_retries=5)
 
     start_time = time.time()
     critical_total = 0
