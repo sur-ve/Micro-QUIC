@@ -1,0 +1,14 @@
+# microQUIC dependencies
+# Install with: pip install -r requirements.txt
+
+# Computer vision
+opencv-python==5.0.0.93
+
+# Numerical / scientific
+numpy==2.5.3
+scipy==1.18.1
+
+# Machine learning
+scikit-learn==1.9.1
+joblib==1.6.0
+

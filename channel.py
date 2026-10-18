@@ -70,9 +70,9 @@ class LossyChannel:
             # If coming from client port -> send to target_port
             # If coming from target_port -> send back to client
             if addr[1] == self.target_port:
-                dest_addr = ('127.0.0.1', self.last_client_port) if hasattr(self, 'last_client_port') else ('127.0.0.1', self.target_port)
+                dest_addr = self.last_client_addr if hasattr(self, 'last_client_addr') else ('127.0.0.1', self.target_port)
             else:
-                self.last_client_port = addr[1]
+                self.last_client_addr = addr
                 dest_addr = ('127.0.0.1', self.target_port)
 
             # 1. Packet Loss Check (optionally spare ACKs so RTO isn't inflated by ACK loss)

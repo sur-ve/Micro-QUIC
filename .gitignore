@@ -1,6 +1,32 @@
+# Python virtual environment
 .venv/
+venv/
+env/
+
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Heavy video training datasets (prevent GitHub bloat)
+data/trainingVideos/
+
+# Generated benchmark & test reports
+benchmark_results.json
+efficiency_report.json
+*.log
+
+# Video & frame output captures
+*.avi
+frames/
+received_frames/
+
+# Legacy / temporary scratch directories
 next/
 notes/
 segmentation.py
-__pycache__/
-*.pyc
+.DS_Store

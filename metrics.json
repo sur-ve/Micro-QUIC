@@ -1,0 +1,28 @@
+{
+  "total_frames": 901,
+  "critical_frames": 121,
+  "normal_frames": 780,
+  "critical_percentage": 13.429522752497224,
+  "label_method": "motion-threshold",
+  "validation_metrics": {
+    "accuracy": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1_score": 1.0,
+    "confusion_matrix": [
+      [
+        157,
+        0
+      ],
+      [
+        0,
+        24
+      ]
+    ]
+  },
+  "feature_importances": {
+    "mean_frame_diff": 1.0,
+    "encoded_size_bytes": 0.0
+  },
+  "model_file": "criticality_model.pkl"
+}
