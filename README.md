@@ -69,7 +69,7 @@ Micro-QUIC encapsulates payloads in a compact 13-byte header formatted in networ
 | `video_sender.py` | Video stream sender with webcam capture, FPS pacing, priority drop, PSK, and rate control |
 | `video_receiver.py` | Video receiver with headless mode, stream saving (`.avi`), frame dumping, and metrics |
 | `sender.py` | Command-line telemetry demo for synthetic traffic |
-| `benchmark.py` | Comparative benchmark suite (TCP vs UDP vs Micro-QUIC) with visual ASCII dashboard |
+| `benchmark.py` | Comparative benchmark suite (TCP vs UDP vs Micro-QUIC) with visual ASCII dashboard and real-video ML workloads |
 | `test_smoke.py` | Comprehensive headless CI smoke test suite (crypto, protocol, ARQ, reassembly, video stream) |
 | `test_efficiency_and_e2e.py` | End-to-end efficiency and scalability sweep suite comparing Micro-QUIC vs TCP across loss rates and payload sizes |
 | `02-todo-features.md`| Completed checklist of all roadmap features |
@@ -120,8 +120,16 @@ python benchmark.py --packets 100 --loss-rate 0.15
 # ML model-driven classification benchmark (dynamically classifies features via decision tree)
 python benchmark.py --use-model --packets 100 --loss-rate 0.15
 
-# Real video frame benchmark (extracts actual frames and runs ML classifier)
+# Real video benchmark: decodes actual frames from the video, runs the ML
+# classifier on each frame's (motion diff, encoded size) features, and sends
+# compact per-frame payloads so TCP / UDP / Micro-QUIC are compared at the
+# same datagram granularity
 python benchmark.py --video data/testVideo.mp4 --packets 20 --loss-rate 0.15
+
+# Same, but sends the actual encoded frame bytes (~93 KB each, split into
+# ~80 MTU-sized datagrams with standard UDP losing whole frames when any
+# datagram is lost — a realistic RTP-style multi-fragment video stream)
+python benchmark.py --video data/testVideo.mp4 --packets 10 --loss-rate 0.15 --full-frames
 
 # Configurable critical ratio benchmark (e.g. 35% critical packets)
 python benchmark.py --critical-ratio 0.35 --packets 100 --loss-rate 0.15

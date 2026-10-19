@@ -5,9 +5,18 @@ Simulates packet loss across all three protocols and evaluates:
 - Total vs Critical packet delivery rates
 - Latency and transfer duration
 - Visual metrics dashboard comparison
+
+Fairness model: every protocol transmits logical messages over the same
+per-datagram loss channel. Messages larger than one datagram are split into
+1200-byte chunks (matching Micro-QUIC's MTU-friendly MAX_PAYLOAD_SIZE),
+and a message counts as received only when *all* of its chunks arrive —
+this is how loss actually treats fragmented video frames on a real network
+(any missing fragment kills the frame). UDP gets no free loopback
+reassembly and payloads are never truncated.
 """
 import argparse
 import json
+import math
 import socket
 import threading
 import time
@@ -18,7 +27,100 @@ import cv2 as cv
 from channel import LossyChannel, LossyTCPChannel, tcp_send_frame, tcp_recv_frame, tcp_send_reliable
 from classifier import predict_criticality
 from features import extractFeatures
-from micro_quic import MicroQUICSocket
+from micro_quic import MicroQUICSocket, MAX_PAYLOAD_SIZE
+
+# Shared loss granularity: all protocols split oversized messages into
+# datagrams of this size so every protocol pays the same multi-fragment
+# cost under packet loss.
+BENCH_CHUNK_SIZE = MAX_PAYLOAD_SIZE
+
+
+def _extract_video_workload(
+    video_path: str,
+    count: int,
+    full_frames: bool,
+) -> Tuple[List[Tuple[bytes, bool]], str]:
+    """Extract frames from a real video and classify each with the trained ML model.
+
+    Criticality is decided *only* by ``predict_criticality`` on real decoded-frame
+    features (diff, encoded size) — no ratios, keyframe intervals, or synthetic
+    feature vectors.
+
+    If ``full_frames`` is False, payloads are compact per-frame descriptors (real
+    frames still drive the features/classification); if True, the actual encoded
+    frame bytes are sent (real multi-fragment frame streaming).
+
+    Criticality is bursty, so the window is extended until it includes a
+    meaningful critical mix (>= 3 criticals or ~10% of the window, bounded
+    +1000 frames) — a calm intro would otherwise starve the benchmark of
+    critical frames ARQ is designed to protect.
+    """
+    cap = cv.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open video file: {video_path}")
+
+    workload: List[Tuple[bytes, bool]] = []
+    prev_gray = None
+    read_frames = 0
+    hard_limit = count if count > 0 else 10 ** 9  # count=0 => whole video
+    extend_limit = hard_limit + 1000  # safety bound for calm-clip extension
+    # Criticality is bursty (e.g. calm intros followed by sustained motion).
+    # Extend until the window contains a few criticals (~10% of the window),
+    # not merely the first one, so the benchmark/results reflect a sensible mix.
+    crit_target = max(3, math.ceil(0.10 * count)) if count > 0 else 1
+    crit_count = 0
+    extended_note_shown = False
+
+    # One continuous sequential pass: read ``count`` frames. If the ML
+    # classifier hasn't reached the critical-frame target yet (calm clip
+    # intro), extend reading up to +1000 more frames so the ARQ path is
+    # meaningfully exercised.
+    while True:
+        if read_frames >= hard_limit:
+            if crit_count >= crit_target or read_frames >= extend_limit:
+                break
+            if not extended_note_shown:
+                print(
+                    f"[BENCHMARK] Only {crit_count}/{len(workload)} ML-critical frames in "
+                    f"first {count}; extending frame window (up to {extend_limit}, "
+                    f"target {crit_target} criticals)."
+                )
+                extended_note_shown = True
+
+        ret, frame = cap.read()
+        if not ret:
+            break
+        read_frames += 1
+
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        diff, size, encoded = extractFeatures(prev_gray, gray, frame)
+        prev_gray = gray
+
+        if encoded is None or size == 0:
+            continue
+
+        is_crit = predict_criticality((diff, size))
+        if is_crit:
+            crit_count += 1
+        payload = encoded.tobytes() if full_frames else (
+            f"VFRAME_{read_frames - 1}|diff={diff:.4f}|size={size}|"
+            f"len={len(encoded)}".encode()
+        )
+        workload.append((payload, is_crit))
+    cap.release()
+
+    if crit_count == 0:
+        print(
+            f"[BENCHMARK] Warning: no ML-critical frames found in '{video_path}'. "
+            "Consider a higher-motion clip or retrain with train_classifier.py."
+        )
+    pct = crit_count / max(1, len(workload)) * 100.0
+    mode = "full encoded frames" if full_frames else "compact payloads, real-frame criticality"
+    desc = (
+        f"Real video '{video_path}' ({mode}) "
+        f"[ML Decision Tree: {crit_count}/{len(workload)} critical ({pct:.1f}%)]"
+    )
+    return workload, desc
 
 
 def create_benchmark_workload(
@@ -26,11 +128,16 @@ def create_benchmark_workload(
     critical_ratio: float = 0.2,
     video_path: str = "",
     use_model: bool = False,
+    full_frames: bool = False,
 ) -> Tuple[List[Tuple[bytes, bool]], str]:
     """Generate or extract the benchmark packet workload.
 
     - If video_path is provided: extracts frames from the video file and evaluates
       each frame dynamically with the trained ML classifier (predict_criticality).
+      By default payloads are compact per-frame descriptors (real decoded frames,
+      real ML criticality) so all three protocols are compared at the same
+      datagram granularity; pass full_frames=True to send the actual encoded
+      frame bytes (real multi-fragment frame streaming).
     - If use_model is True without video: evaluates simulated video motion/size
       features with predict_criticality to dynamically determine criticality.
     - Otherwise: uses the configured critical_ratio (default 0.2 = 20%).
@@ -38,28 +145,10 @@ def create_benchmark_workload(
     workload: List[Tuple[bytes, bool]] = []
 
     if video_path:
-        cap = cv.VideoCapture(video_path)
-        if not cap.isOpened():
+        try:
+            return _extract_video_workload(video_path, count, full_frames)
+        except FileNotFoundError:
             raise SystemExit(f"[BENCHMARK] Error: Could not open video file: {video_path}")
-        prev_gray = None
-        frame_idx = 0
-        while len(workload) < count:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-            diff, size, encoded = extractFeatures(prev_gray, gray, frame)
-            prev_gray = gray
-            if encoded is None or size == 0:
-                continue
-            # Frame 0 is always keyframe/critical; subsequent frames classified by ML model
-            is_crit = True if frame_idx == 0 else predict_criticality((diff, size))
-            workload.append((encoded.tobytes(), is_crit))
-            frame_idx += 1
-        cap.release()
-        crit_count = sum(1 for _, c in workload if c)
-        desc = f"Real video '{video_path}' [ML Decision Tree: {crit_count}/{len(workload)} critical ({crit_count / max(1, len(workload)) * 100:.1f}%)]"
-        return workload, desc
 
     if use_model:
         for i in range(count):
@@ -183,7 +272,12 @@ def run_tcp_benchmark(workload_or_count: Union[int, List[Tuple[bytes, bool]]], l
 
 
 def run_udp_benchmark(workload_or_count: Union[int, List[Tuple[bytes, bool]]], loss_rate: float) -> dict:
-    """Standard UDP baseline: no ACKs, drops under loss without retransmission."""
+    """Standard UDP baseline: no ACKs, drops under loss without retransmission.
+
+    Oversized messages are split into BENCH_CHUNK_SIZE datagrams (like real
+    RTP-style UDP video streaming). A message counts as received only when
+    every datagram of it arrives; losing any datagram kills the message.
+    """
     workload = _resolve_workload(workload_or_count)
     total_packets = len(workload)
     server_port = 55003
@@ -202,15 +296,47 @@ def run_udp_benchmark(workload_or_count: Union[int, List[Tuple[bytes, bool]]], l
 
     def receiver_thread():
         nonlocal received_count, critical_received, bytes_received
+        # frame_id -> {"n": total chunks, "chunks": {idx: size}, "critical": bool}
+        in_flight_frames: Dict[str, Dict[str, Any]] = {}
         while True:
             try:
                 data, _ = server_sock.recvfrom(65535)
-                received_count += 1
-                bytes_received += len(data)
-                if data.startswith(b"CRITICAL"):
-                    critical_received += 1
             except socket.timeout:
                 break
+
+            if data.startswith(b"CRITICAL_"):
+                is_crit = True
+                rest = data[len(b"CRITICAL_"):]
+            elif data.startswith(b"NORMAL_"):
+                is_crit = False
+                rest = data[len(b"NORMAL_"):]
+            else:
+                continue
+
+            # Layout: FRAME_ID_NNN_JJJ_<chunk bytes>
+            parts = rest.split(b"_", 3)
+            if len(parts) != 4:
+                continue
+            fid, n_bytes, j_bytes, chunk = parts
+            if n_bytes.isdigit() and j_bytes.isdigit():
+                fid = fid.decode(errors="ignore")
+                n, j = int(n_bytes), int(j_bytes)
+                if n <= 0 or j >= n:
+                    continue
+                state = in_flight_frames.setdefault(
+                    fid, {"n": n, "chunks": {}, "critical": is_crit}
+                )
+                if n != state["n"] or is_crit != state["critical"]:
+                    continue
+                state["chunks"][j] = len(chunk)
+
+                if len(state["chunks"]) == state["n"]:
+                    # All chunks arrived: message delivered
+                    received_count += 1
+                    bytes_received += sum(state["chunks"].values())
+                    if state["critical"]:
+                        critical_received += 1
+                    in_flight_frames.pop(fid, None)
 
     t = threading.Thread(target=receiver_thread, daemon=True)
     t.start()
@@ -224,10 +350,18 @@ def run_udp_benchmark(workload_or_count: Union[int, List[Tuple[bytes, bool]]], l
         prefix = b"CRITICAL_" if is_crit else b"NORMAL_"
         if is_crit:
             critical_total += 1
-        payload = prefix + item_payload
-        bytes_sent += len(payload)
-        client_sock.sendto(payload[:65000], ('127.0.0.1', proxy_port))
-        time.sleep(0.001)
+        bytes_sent += len(item_payload)
+        chunks = [
+            item_payload[j:j + BENCH_CHUNK_SIZE]
+            for j in range(0, len(item_payload), BENCH_CHUNK_SIZE)
+        ] or [b""]
+        n = len(chunks)
+        for j, chunk in enumerate(chunks):
+            header = prefix + f"{i:05d}_{n:03d}_{j:03d}_".encode()
+            client_sock.sendto(header + chunk, ('127.0.0.1', proxy_port))
+            time.sleep(0.001)
+        if n > 1:
+            time.sleep(0.02)  # inter-message pacing for bursty multi-datagram frames
 
     time.sleep(1.2)
     end_time = time.time() - 1.2
@@ -363,6 +497,9 @@ if __name__ == "__main__":
     parser.add_argument("--loss-rate", type=float, default=0.15, help="Simulated loss rate (0.0 to 1.0)")
     parser.add_argument("--critical-ratio", type=float, default=0.2, help="Ratio of critical packets when using synthetic workload (default: 0.2)")
     parser.add_argument("--video", default="", help="Path to video file for ML-driven frame criticality benchmarking")
+    parser.add_argument("--full-frames", action="store_true",
+                        help="Send actual encoded frame bytes from the video (multi-fragment stream) "
+                             "instead of compact per-frame payloads")
     parser.add_argument("--use-model", action="store_true", help="Use trained ML model to classify synthetic feature vectors")
     parser.add_argument("--export-json", default="", help="Export benchmark results to JSON file")
     args = parser.parse_args()
@@ -372,6 +509,7 @@ if __name__ == "__main__":
         critical_ratio=args.critical_ratio,
         video_path=args.video,
         use_model=args.use_model,
+        full_frames=args.full_frames,
     )
 
     print(f"Running benchmarks with {len(workload)} packets under {int(args.loss_rate * 100)}% simulated packet loss...")
